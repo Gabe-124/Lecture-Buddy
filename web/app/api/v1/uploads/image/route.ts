@@ -1,15 +1,34 @@
 import type { UploadImageRequest } from "@/lib/api-contracts";
 import { NextResponse, type NextRequest } from "next/server";
 
-import { jsonError, parseUploadRequest, requirePiAuthorization } from "../../_utils";
+import { persistUploadedImageArtifact } from "../../_artifact_storage";
+import { jsonError, parseUploadRequestWithFile, requirePiAuthorization } from "../../_utils";
 import { postUploadsImage } from "../../_store";
 
-// TODO(upload-image-storage): Persist uploaded image bytes through the existing cloud storage
-// path or UploadThing bridge after the server-side storage handoff is wired.
 export async function POST(request: NextRequest) {
   try {
     requirePiAuthorization(request);
-    const payload = await parseUploadRequest<UploadImageRequest>(request);
+    const { payload, file } = await parseUploadRequestWithFile<UploadImageRequest>(request);
+
+    if (file) {
+      const persistedArtifact = await persistUploadedImageArtifact({
+        file,
+        sessionId: payload.sessionId,
+        audioChunkId: String(payload.capturedImage?.id ?? "captured-image"),
+        originalFileName: payload.artifact?.originalFileName,
+      });
+
+      payload.capturedImage = {
+        ...payload.capturedImage,
+        localPath: persistedArtifact.localPath ?? payload.capturedImage.localPath,
+        storageKey: persistedArtifact.storageKey,
+      };
+      payload.artifact = {
+        ...payload.artifact,
+        storageKey: persistedArtifact.storageKey,
+      };
+    }
+
     const response = await postUploadsImage(payload);
     return NextResponse.json(response);
   } catch (error) {

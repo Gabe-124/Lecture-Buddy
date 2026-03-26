@@ -11,6 +11,7 @@ import type {
   UploadImageMetadataResponse,
   UploadImageRequest,
 } from "@/lib/api-contracts";
+import type { PiControlCommand, PiControlState } from "@/lib/control-types";
 import { processSessionWorker } from "@/server/cloud_processing/workers/process_session";
 import { fetchMutation, fetchQuery } from "convex/nextjs";
 
@@ -157,6 +158,61 @@ export async function postSessionsEnd(
   }
 }
 
+export async function postReprocessSession(sessionId: string) {
+  console.info("[sessions.reprocess] begin", { sessionId });
+
+  try {
+    await fetchMutation(
+      lectureBuddyApi.markProcessingRunning,
+      { sessionId },
+      getConvexServerOptions(),
+    );
+
+    const bundle = await getSessionById(sessionId);
+    if (!bundle) {
+      throw new Error(`Unable to load session detail for processing: ${sessionId}`);
+    }
+
+    const result = await processSessionWorker({
+      sessionId,
+      audioChunks: bundle.audioChunks,
+      capturedImages: bundle.capturedImages,
+      existingModeWindows: bundle.modeWindows,
+    });
+
+    const persisted = await fetchMutation(
+      lectureBuddyApi.applyProcessingResult,
+      {
+        sessionId,
+        result: result as unknown as Record<string, unknown>,
+      },
+      getConvexServerOptions(),
+    );
+
+    console.info("[sessions.reprocess] completed", {
+      sessionId,
+      processingJobStatus: persisted.session.processingJobStatus,
+    });
+
+    return {
+      session: persisted.session,
+    };
+  } catch (error) {
+    const rootCauseMessage =
+      error instanceof Error
+        ? error.message
+        : "Session reprocessing failed before producing output.";
+
+    await fetchMutation(
+      lectureBuddyApi.markProcessingFailed,
+      { sessionId, error: rootCauseMessage },
+      getConvexServerOptions(),
+    );
+
+    throw new Error(`Session reprocessing failed: ${rootCauseMessage}`);
+  }
+}
+
 export async function postHeartbeat(
   payload: HeartbeatRequest,
 ): Promise<HeartbeatResponse> {
@@ -171,6 +227,52 @@ export async function getSessionById(sessionId: string): Promise<SessionDetailVi
   return await fetchQuery(
     lectureBuddyApi.getSessionById,
     { sessionId },
+    getConvexServerOptions(),
+  );
+}
+
+export async function pollNextPiControlCommand(payload: {
+  deviceId: string;
+  runtimeStatus?: string;
+  activeSessionId?: string;
+  deviceIpAddress?: string;
+}): Promise<{ command: PiControlCommand | null }> {
+  return await fetchMutation(
+    lectureBuddyApi.pollNextPiControlCommand,
+    { ...payload },
+    getConvexServerOptions(),
+  );
+}
+
+export async function acknowledgePiControlCommand(payload: {
+  commandId: string;
+  status: "applied" | "failed";
+  errorMessage?: string;
+}): Promise<PiControlCommand> {
+  return await fetchMutation(
+    lectureBuddyApi.acknowledgePiControlCommand,
+    { ...payload },
+    getConvexServerOptions(),
+  );
+}
+
+export async function enqueuePiControlCommand(payload: {
+  deviceId: string;
+  commandType: "start_session" | "stop_session" | "restart_service";
+  requestedBy: string;
+  reason?: string;
+}): Promise<PiControlCommand> {
+  return await fetchMutation(
+    lectureBuddyApi.enqueuePiControlCommand,
+    { ...payload },
+    getConvexServerOptions(),
+  );
+}
+
+export async function getPiControlState(deviceId: string): Promise<PiControlState> {
+  return await fetchQuery(
+    lectureBuddyApi.getPiControlState,
+    { deviceId },
     getConvexServerOptions(),
   );
 }

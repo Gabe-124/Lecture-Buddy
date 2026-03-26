@@ -27,6 +27,7 @@ class CreateSessionRequest:
     started_at: Timestamp
     classroom_label: str | None = None
     client_session_id: str | None = None
+    device_ip_address: str | None = None
 
 
 @dataclass(slots=True)
@@ -103,6 +104,7 @@ class HeartbeatRequest:
     last_audio_sequence_number: int | None = None
     last_image_sequence_number: int | None = None
     runtime_status: str | None = None
+    device_ip_address: str | None = None
 
 
 @dataclass(slots=True)

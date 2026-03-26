@@ -254,6 +254,7 @@ class CloudUploader:
                 "startedAt": item.metadata.get("started_at") or item.captured_at or item.created_at,
                 "classroomLabel": item.metadata.get("classroom_label"),
                 "clientSessionId": item.session_id,
+                "deviceIpAddress": item.metadata.get("device_ip_address"),
             }
         if event_type == "session_stopped":
             return {
@@ -271,6 +272,7 @@ class CloudUploader:
                 "lastAudioSequenceNumber": item.metadata.get("last_audio_sequence_number"),
                 "lastImageSequenceNumber": item.metadata.get("last_image_sequence_number"),
                 "runtimeStatus": item.metadata.get("runtime_status"),
+                "deviceIpAddress": item.metadata.get("device_ip_address"),
             }
 
         raise ValueError(f"unsupported session event type: {event_type}")

@@ -37,6 +37,7 @@ export interface CreateSessionRequest {
   startedAt: Timestamp;
   classroomLabel?: string;
   clientSessionId?: string;
+  deviceIpAddress?: string;
 }
 
 export interface CreateSessionResponse {
@@ -91,6 +92,7 @@ export interface HeartbeatRequest {
   lastAudioSequenceNumber?: number;
   lastImageSequenceNumber?: number;
   runtimeStatus?: string;
+  deviceIpAddress?: string;
 }
 
 export interface HeartbeatResponse {

@@ -4,6 +4,7 @@ import type {
   Session,
   UncertaintyFlag,
 } from "@/lib/shared-types";
+import type { PiControlState } from "@/lib/control-types";
 import { fetchQuery } from "convex/nextjs";
 
 import { lectureBuddyApi } from "@/lib/convexApi";
@@ -59,6 +60,14 @@ export async function getDurableSessionBundle(
   return await fetchQuery(
     lectureBuddyApi.getSessionById,
     { sessionId },
+    getConvexServerOptions(),
+  );
+}
+
+export async function getPiControlState(deviceId: string): Promise<PiControlState> {
+  return await fetchQuery(
+    lectureBuddyApi.getPiControlState,
+    { deviceId },
     getConvexServerOptions(),
   );
 }

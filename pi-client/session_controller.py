@@ -11,8 +11,10 @@ from pathlib import Path
 from audio_capture import AudioCapture, AudioCaptureResult
 from camera_capture import CameraCapture, ImageCaptureResult
 from config import PiClientConfig
+from control_client import ControlClient
 from local_queue import FileBackedQueue, QueueUploadItem
 from uploader import CloudUploader
+from network import get_local_ip_address
 
 
 def utc_now() -> str:
@@ -34,6 +36,7 @@ class SessionState:
     last_audio_captured_at: str | None = None
     last_image_saved_at: str | None = None
     last_saved_image_path: str | None = None
+    device_ip_address: str | None = None
 
 
 class SessionStateStore:
@@ -92,18 +95,24 @@ class SessionController:
     state_store: SessionStateStore = field(init=False)
     session_state: SessionState | None = field(default=None, init=False)
     _stop_requested: bool = field(default=False, init=False)
+    _restart_requested: bool = field(default=False, init=False)
     _last_heartbeat_enqueued_at: float = field(default=0.0, init=False)
+    control_client: ControlClient = field(init=False)
+    _last_control_command_id: str | None = field(default=None, init=False)
+    _last_control_command_status: str | None = field(default=None, init=False)
 
     def __post_init__(self) -> None:
         self.queue = FileBackedQueue(self.config.paths.queue_file, logger=self.logger)
         self.uploader = CloudUploader(config=self.config, queue=self.queue, logger=self.logger)
         self.audio_capture = AudioCapture(config=self.config, logger=self.logger)
         self.camera_capture = CameraCapture(config=self.config, logger=self.logger)
+        self.control_client = ControlClient(config=self.config, logger=self.logger)
         self.state_store = SessionStateStore(
             self.config.paths.session_state_file,
             self.config.paths.sessions_dir,
             logger=self.logger,
         )
+        self._load_control_state()
         self.session_state = self.state_store.load()
         if self.session_state is not None:
             self.logger.info(
@@ -117,13 +126,21 @@ class SessionController:
         self.ensure_session_started(session_title=session_title)
         cycles = 0
         while not self._stop_requested:
+            self._poll_and_apply_control_command(session_title=session_title)
+
+            if self.session_state is None:
+                self.uploader.flush_ready()
+                time.sleep(self.config.heartbeat_seconds)
+                continue
+
             self.run_cycle()
             cycles += 1
             if max_cycles is not None and cycles >= max_cycles:
                 self.logger.info("Reached max cycle count of %s; stopping.", max_cycles)
                 break
             time.sleep(self.config.heartbeat_seconds)
-        self.stop_session(reason="graceful-stop")
+        if self.session_state is not None:
+            self.stop_session(reason="graceful-stop")
 
     def run_once(self, *, session_title: str, stop_after_cycle: bool = True) -> None:
         self.ensure_session_started(session_title=session_title)
@@ -170,6 +187,7 @@ class SessionController:
             classroom_label=self.config.classroom_label,
             started_at=utc_now(),
             status="running",
+                device_ip_address=get_local_ip_address(),
         )
         self._sync_capture_state()
         self.state_store.save(self.session_state)
@@ -298,6 +316,7 @@ class SessionController:
                     "stop_reason": self.session_state.stop_reason,
                     "last_audio_sequence_number": self.session_state.audio_sequence_number,
                     "last_image_sequence_number": self.session_state.image_sequence_number,
+                    "device_ip_address": self.session_state.device_ip_address,
                 },
             )
         )
@@ -320,6 +339,11 @@ class SessionController:
         if now - self._last_heartbeat_enqueued_at < self.config.heartbeat_seconds:
             return
 
+        current_ip = get_local_ip_address()
+        if self.session_state.device_ip_address != current_ip:
+            self.session_state.device_ip_address = current_ip
+            self.state_store.save(self.session_state)
+
         timestamp = utc_now()
         self.queue.enqueue(
             QueueUploadItem(
@@ -335,7 +359,101 @@ class SessionController:
                     "last_audio_sequence_number": self.session_state.audio_sequence_number,
                     "last_image_sequence_number": self.session_state.image_sequence_number,
                     "runtime_status": self.session_state.status,
+                    "device_ip_address": self.session_state.device_ip_address,
                 },
             )
         )
         self._last_heartbeat_enqueued_at = now
+
+    @property
+    def restart_requested(self) -> bool:
+        return self._restart_requested
+
+    def _poll_and_apply_control_command(self, *, session_title: str) -> None:
+        runtime_status = self.snapshot().runtime_status
+        command = self.control_client.poll_next_command(
+            runtime_status=runtime_status,
+            active_session_id=self.session_state.session_id if self.session_state else None,
+            device_ip_address=(
+                self.session_state.device_ip_address
+                if self.session_state
+                else get_local_ip_address()
+            ),
+        )
+        if command is None:
+            return
+
+        command_id = str(command.get("commandId", ""))
+        command_type = str(command.get("commandType", ""))
+        if not command_id or not command_type:
+            return
+
+        if command_id == self._last_control_command_id and self._last_control_command_status:
+            self.control_client.acknowledge_command(
+                command_id=command_id,
+                status=self._last_control_command_status,
+            )
+            return
+
+        self.logger.info("Applying control command %s (%s)", command_id, command_type)
+        try:
+            if command_type == "start_session":
+                if self.session_state is None:
+                    self.ensure_session_started(session_title=session_title)
+                self._save_control_state(command_id, "applied")
+                self.control_client.acknowledge_command(command_id=command_id, status="applied")
+                return
+
+            if command_type == "stop_session":
+                if self.session_state is not None:
+                    self.stop_session(reason="remote-stop-command")
+                self._save_control_state(command_id, "applied")
+                self.control_client.acknowledge_command(command_id=command_id, status="applied")
+                return
+
+            if command_type == "restart_service":
+                if self.session_state is not None:
+                    self.stop_session(reason="remote-restart-command")
+                self._save_control_state(command_id, "applied")
+                self.control_client.acknowledge_command(command_id=command_id, status="applied")
+                self._restart_requested = True
+                self._stop_requested = True
+                return
+
+            raise RuntimeError(f"unsupported control command type: {command_type}")
+        except Exception as exc:
+            self.logger.exception("Failed to apply control command %s: %s", command_id, exc)
+            self._save_control_state(command_id, "failed")
+            self.control_client.acknowledge_command(
+                command_id=command_id,
+                status="failed",
+                error_message=str(exc),
+            )
+
+    def _load_control_state(self) -> None:
+        path = self.config.paths.control_state_file
+        if not path.exists():
+            return
+        try:
+            raw = json.loads(path.read_text(encoding="utf-8"))
+            self._last_control_command_id = str(raw.get("last_command_id")) if raw.get("last_command_id") else None
+            self._last_control_command_status = str(raw.get("last_command_status")) if raw.get("last_command_status") else None
+        except Exception:
+            self.logger.warning("Unable to read control state file at %s", path)
+
+    def _save_control_state(self, command_id: str, status: str) -> None:
+        self._last_control_command_id = command_id
+        self._last_control_command_status = status
+        try:
+            self.config.paths.control_state_file.write_text(
+                json.dumps(
+                    {
+                        "last_command_id": command_id,
+                        "last_command_status": status,
+                    },
+                    indent=2,
+                ),
+                encoding="utf-8",
+            )
+        except Exception:
+            self.logger.warning("Unable to persist control state file at %s", self.config.paths.control_state_file)

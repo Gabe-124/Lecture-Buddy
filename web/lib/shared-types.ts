@@ -56,9 +56,11 @@ export interface NormalizedBoundingBox {
 export interface Session {
   id: string;
   title: string;
+  suggestedTitle?: string;
   startedAt: Timestamp;
   status: SessionStatus;
   deviceId: string;
+  deviceIpAddress?: string;
   classroomLabel?: string;
   endedAt?: Timestamp;
   createdAt?: Timestamp;

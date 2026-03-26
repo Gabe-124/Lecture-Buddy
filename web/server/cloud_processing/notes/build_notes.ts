@@ -12,6 +12,8 @@ import { composeEvidenceBackedNotes } from "./note_composer";
 
 export interface NotesPipelineInput {
   sessionId: string;
+  audioChunkCount: number;
+  audioUncertaintyFlags: UncertaintyFlag[];
   transcriptSegments: TranscriptSegment[];
   ocrResults: OCRResult[];
   visionResults: VisionResult[];
@@ -38,6 +40,8 @@ export function buildNotesPipeline(
 
   const composedNotes = composeEvidenceBackedNotes({
     sessionId: input.sessionId,
+    audioChunkCount: input.audioChunkCount,
+    audioUncertaintyFlags: input.audioUncertaintyFlags,
     transcriptSegments: input.transcriptSegments,
     ocrResults: input.ocrResults,
     visionResults: input.visionResults,

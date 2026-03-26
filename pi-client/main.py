@@ -142,6 +142,9 @@ def main() -> int:
         session_title=session_title,
         max_cycles=getattr(args, "max_cycles", None),
     )
+    if controller.restart_requested:
+        logger.info("Restart requested by control command; exiting for systemd restart.")
+        return 75
     return 0
 
 

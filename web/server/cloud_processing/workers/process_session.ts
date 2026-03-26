@@ -57,6 +57,8 @@ export async function processSessionWorker(
 
   const notes = buildNotesPipeline({
     sessionId: input.sessionId,
+    audioChunkCount: input.audioChunks.length,
+    audioUncertaintyFlags: audio.uncertaintyFlags,
     transcriptSegments: audio.transcriptSegments,
     ocrResults: image.ocrResults,
     visionResults: image.visionResults,

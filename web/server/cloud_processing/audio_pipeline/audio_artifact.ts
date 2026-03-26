@@ -38,7 +38,7 @@ export async function loadAudioArtifact(chunk: AudioChunk): Promise<LoadedAudioA
         sourceRef: ref,
       };
     } catch (error) {
-      lastError = error instanceof Error ? error : new Error(String(error));
+      lastError = toArtifactLoadError(chunk.id, ref, error);
     }
   }
 
@@ -69,4 +69,26 @@ function isHttpUrl(value: string): boolean {
   } catch {
     return false;
   }
+}
+
+function toArtifactLoadError(chunkId: string, ref: string, error: unknown): Error {
+  if (
+    isMissingFileError(error) &&
+    ref.includes("/tmp/lecture-buddy-audio-artifacts/")
+  ) {
+    return new Error(
+      `Audio for this session is no longer available for reprocessing (chunk ${chunkId}).`,
+    );
+  }
+
+  return error instanceof Error ? error : new Error(String(error));
+}
+
+function isMissingFileError(error: unknown): boolean {
+  if (!(error instanceof Error)) {
+    return false;
+  }
+
+  const code = "code" in error ? (error as { code?: unknown }).code : undefined;
+  return code === "ENOENT";
 }

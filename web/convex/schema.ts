@@ -39,6 +39,18 @@ const uploadReceiptStatus = v.union(
   v.literal("rejected"),
 );
 
+const piControlCommandType = v.union(
+  v.literal("start_session"),
+  v.literal("stop_session"),
+  v.literal("restart_service"),
+);
+
+const piControlCommandStatus = v.union(
+  v.literal("pending"),
+  v.literal("applied"),
+  v.literal("failed"),
+);
+
 const uncertaintySeverity = v.union(
   v.literal("low"),
   v.literal("medium"),
@@ -124,6 +136,7 @@ export default defineSchema({
   sessions: defineTable({
     sessionId: v.string(),
     title: v.string(),
+    suggestedTitle: v.optional(v.string()),
     startedAt: v.string(),
     status: sessionStatus,
     deviceId: v.string(),
@@ -134,6 +147,7 @@ export default defineSchema({
     primarySpeakerLabel: v.optional(v.string()),
     processingJobStatus: v.optional(processingJobStatus),
     finalNotesId: v.optional(v.string()),
+      deviceIpAddress: v.optional(v.string()),
     uncertaintyFlags: v.array(uncertaintyFlag),
   })
     .index("by_session_id", ["sessionId"])
@@ -269,4 +283,33 @@ export default defineSchema({
   })
     .index("by_upload_receipt_id", ["uploadReceiptId"])
     .index("by_session", ["sessionId"]),
+
+  piDevices: defineTable({
+    deviceId: v.string(),
+    lastSeenAt: v.string(),
+    lastCommandPollAt: v.string(),
+    runtimeStatus: v.optional(v.string()),
+    activeSessionId: v.optional(v.string()),
+    deviceIpAddress: v.optional(v.string()),
+    updatedAt: v.string(),
+  }).index("by_device_id", ["deviceId"]),
+
+  piControlCommands: defineTable({
+    commandId: v.string(),
+    deviceId: v.string(),
+    commandType: piControlCommandType,
+    status: piControlCommandStatus,
+    requestedAt: v.string(),
+    requestedBy: v.string(),
+    reason: v.optional(v.string()),
+    lastFetchedAt: v.optional(v.string()),
+    fetchCount: v.number(),
+    appliedAt: v.optional(v.string()),
+    failedAt: v.optional(v.string()),
+    errorMessage: v.optional(v.string()),
+    updatedAt: v.string(),
+  })
+    .index("by_command_id", ["commandId"])
+    .index("by_device", ["deviceId"])
+    .index("by_device_status", ["deviceId", "status"]),
 });

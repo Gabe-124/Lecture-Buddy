@@ -75,6 +75,14 @@ The Pi client now targets these cloud API routes off `CLOUD_API_BASE_URL`:
 - `POST /api/v1/sessions/end`
 - `POST /api/v1/heartbeat`
 - `GET /api/v1/sessions/:id`
+- `POST /api/v1/control/commands/next`
+- `POST /api/v1/control/commands/ack`
+
+Control flow uses outbound polling only (no inbound port on the Pi):
+
+- dashboard enqueues a command in cloud storage
+- Pi polls `POST /api/v1/control/commands/next`
+- Pi applies command locally and acknowledges via `POST /api/v1/control/commands/ack`
 
 `UPLOAD_INGEST_URL` is kept only as a backward-compatible fallback while you migrate older local `.env` files.
 

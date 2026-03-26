@@ -31,11 +31,7 @@ export function SessionList({ summaries }: SessionListProps) {
       ) : (
         <div className="session-list">
           {summaries.map((summary) => (
-            <Link
-              className="card session-card"
-              href={buildSessionHref(summary.session.id)}
-              key={summary.session.id}
-            >
+            <article className="card session-card" key={summary.session.id}>
               <div className="session-card__top">
                 <div className="session-card__badges">
                   <span className="badge">{formatLabel(summary.session.status)}</span>
@@ -46,7 +42,11 @@ export function SessionList({ summaries }: SessionListProps) {
                   ) : null}
                 </div>
               </div>
-              <h3>{summary.session.title}</h3>
+              <h3>
+                <Link className="session-card__title-link" href={buildSessionHref(summary.session.id)}>
+                  {summary.session.title}
+                </Link>
+              </h3>
               <p className="meta">{summary.session.classroomLabel ?? "Classroom"} • {formatSessionDate(summary.session.startedAt)}</p>
 
               <div className="readiness-grid">
@@ -86,7 +86,7 @@ export function SessionList({ summaries }: SessionListProps) {
                   <span className="meta">Modes {summary.session.modeWindows.length}</span>
                 </div>
               </details>
-            </Link>
+            </article>
           ))}
         </div>
       )}

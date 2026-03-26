@@ -243,6 +243,7 @@ class Session:
     primary_speaker_label: str | None = None
     processing_job_status: ProcessingJobStatus | None = None
     final_notes_id: str | None = None
+    device_ip_address: str | None = None
     mode_windows: list[ModeWindow] = field(default_factory=list)
     uncertainty_flags: list[UncertaintyFlag] = field(default_factory=list)
 

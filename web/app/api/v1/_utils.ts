@@ -69,6 +69,17 @@ export function requirePiAuthorization(
   }
 }
 
+export function requireDashboardControlAuthorization(controlKey: string | undefined): void {
+  const expectedControlKey = process.env.DASHBOARD_CONTROL_API_KEY;
+  if (!expectedControlKey) {
+    throw new Error("Dashboard control is not configured.");
+  }
+
+  if (!controlKey || controlKey !== expectedControlKey) {
+    throw new Error("Unauthorized control action.");
+  }
+}
+
 export function jsonError(message: string, status = 400) {
   return NextResponse.json({ error: message }, { status });
 }

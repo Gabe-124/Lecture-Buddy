@@ -45,6 +45,7 @@ class PathConfig:
     sessions_dir: Path
     queue_file: Path
     session_state_file: Path
+    control_state_file: Path
 
 
 @dataclass(slots=True)
@@ -98,6 +99,14 @@ class UploadConfig:
     def heartbeat_url(self) -> str:
         return _join_cloud_api_url(self.cloud_api_base_url, "/api/v1/heartbeat")
 
+    @property
+    def control_poll_url(self) -> str:
+        return _join_cloud_api_url(self.cloud_api_base_url, "/api/v1/control/commands/next")
+
+    @property
+    def control_ack_url(self) -> str:
+        return _join_cloud_api_url(self.cloud_api_base_url, "/api/v1/control/commands/ack")
+
 
 @dataclass(slots=True)
 class LoggingConfig:
@@ -149,6 +158,7 @@ def load_config() -> PiClientConfig:
         sessions_dir=data_dir / "sessions",
         queue_file=queue_dir / "upload-queue.json",
         session_state_file=cache_dir / "current-session.json",
+        control_state_file=cache_dir / "control-state.json",
     )
 
     cloud_api_base_url = _resolve_cloud_api_base_url(

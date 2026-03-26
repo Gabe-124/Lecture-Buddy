@@ -1,9 +1,10 @@
 import { notFound } from "next/navigation";
 
 import { ImageGallery } from "@/components/ImageGallery";
+import { PiControlPanel } from "@/components/PiControlPanel";
 import { SessionDetail } from "@/components/SessionDetail";
 import { TranscriptPanel } from "@/components/TranscriptPanel";
-import { getDurableSessionBundle } from "@/lib/sessionData";
+import { getDurableSessionBundle, getPiControlState } from "@/lib/sessionData";
 
 export const dynamic = "force-dynamic";
 
@@ -19,10 +20,13 @@ export default async function SessionImagesPage({
     notFound();
   }
 
+  const controlState = await getPiControlState(bundle.session.deviceId);
+
   return (
     <SessionDetail
       activeView="images"
       bundle={bundle}
+      controlPanel={<PiControlPanel deviceId={bundle.session.deviceId} initialState={controlState} />}
       primaryPanel={
         <ImageGallery
           images={bundle.capturedImages}

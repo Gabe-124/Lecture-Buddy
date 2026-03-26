@@ -12,6 +12,7 @@ import type {
   UploadImageMetadataResponse,
 } from "@/lib/api-contracts";
 import type { Session } from "@/lib/shared-types";
+import type { PiControlCommand, PiControlState } from "@/lib/control-types";
 import { makeFunctionReference } from "convex/server";
 
 type ConvexArgs<T> = T & Record<string, unknown>;
@@ -65,4 +66,34 @@ export const lectureBuddyApi = {
     { sessionId: string; result: Record<string, unknown> },
     { session: Session }
   >("lectureBuddy:applyProcessingResult"),
+  getPiControlState: makeFunctionReference<
+    "query",
+    { deviceId: string },
+    PiControlState
+  >("lectureBuddy:getPiControlState"),
+  enqueuePiControlCommand: makeFunctionReference<
+    "mutation",
+    {
+      deviceId: string;
+      commandType: "start_session" | "stop_session" | "restart_service";
+      requestedBy: string;
+      reason?: string;
+    },
+    PiControlCommand
+  >("lectureBuddy:enqueuePiControlCommand"),
+  pollNextPiControlCommand: makeFunctionReference<
+    "mutation",
+    {
+      deviceId: string;
+      runtimeStatus?: string;
+      activeSessionId?: string;
+      deviceIpAddress?: string;
+    },
+    { command: PiControlCommand | null }
+  >("lectureBuddy:pollNextPiControlCommand"),
+  acknowledgePiControlCommand: makeFunctionReference<
+    "mutation",
+    { commandId: string; status: "applied" | "failed"; errorMessage?: string },
+    PiControlCommand
+  >("lectureBuddy:acknowledgePiControlCommand"),
 };

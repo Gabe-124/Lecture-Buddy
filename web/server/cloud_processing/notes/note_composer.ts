@@ -10,6 +10,8 @@ import type { StructuredVisualContext } from "../image_pipeline/types";
 
 export interface NoteComposerInput {
   sessionId: string;
+  audioChunkCount: number;
+  audioUncertaintyFlags: UncertaintyFlag[];
   transcriptSegments: TranscriptSegment[];
   ocrResults: OCRResult[];
   visionResults: VisionResult[];
@@ -25,18 +27,18 @@ export interface NoteComposerOutput {
 export function composeEvidenceBackedNotes(
   input: NoteComposerInput,
 ): NoteComposerOutput {
-  const transcriptEvidence = input.transcriptSegments
-    .map((segment) => segment.text.trim())
-    .filter(Boolean)
-    .slice(0, 8);
-  const ocrEvidence = input.ocrResults
-    .map((result) => result.text.trim())
-    .filter(Boolean)
-    .slice(0, 5);
-  const visionEvidence = input.visionResults
-    .map((result) => result.summary.trim())
-    .filter(Boolean)
-    .slice(0, 5);
+  const transcriptEvidence = collectEvidence(
+    input.transcriptSegments.map((segment) => segment.text),
+    10,
+  );
+  const ocrEvidence = collectEvidence(
+    input.ocrResults.map((result) => result.text),
+    6,
+  );
+  const visionEvidence = collectEvidence(
+    input.visionResults.map((result) => result.summary),
+    6,
+  );
 
   const uncertaintyFlags = dedupeUncertaintyFlags([
     ...input.transcriptSegments.flatMap((segment) => segment.uncertaintyFlags),
@@ -45,36 +47,44 @@ export function composeEvidenceBackedNotes(
     ...input.visualContexts.flatMap((context) => context.uncertaintyFlags),
   ]);
 
-  if (
-    transcriptEvidence.length === 0 &&
-    ocrEvidence.length === 0 &&
-    visionEvidence.length === 0
-  ) {
+  const hasTranscriptEvidence = transcriptEvidence.length > 0;
+  const hasVisualEvidence = ocrEvidence.length > 0 || visionEvidence.length > 0;
+  const canUseImageOnlyFallback = input.audioChunkCount === 0;
+  const hasAnyEvidence = hasTranscriptEvidence || (canUseImageOnlyFallback && hasVisualEvidence);
+
+  if (!hasAnyEvidence) {
     uncertaintyFlags.push({
       kind: "note-evidence-empty",
-      message:
-        "The notes pipeline had no grounded transcript, OCR, or vision content to merge.",
+      message: "No usable audio or image evidence was available for notes generation.",
       source: "notes",
       severity: "high",
     });
   }
 
   const dominantMode = input.modeWindows[0]?.mode ?? "just_talking";
-  const content = [
-    `Mode: ${dominantMode}`,
-    "Grounding policy: this starter note composer only surfaces evidence already present in transcript, OCR, and vision outputs.",
-    buildEvidenceBlock("Transcript evidence", transcriptEvidence, "No transcript evidence available yet."),
-    buildEvidenceBlock("OCR evidence", ocrEvidence, "No OCR evidence available yet."),
-    buildEvidenceBlock("Vision evidence", visionEvidence, "No Moondream 3 evidence available yet."),
-    buildUncertaintyBlock(uncertaintyFlags),
-  ].join("\n\n");
+  const content = hasAnyEvidence
+    ? buildReadableNotesContent({
+        transcriptEvidence,
+        ocrEvidence,
+        visionEvidence,
+      })
+    : buildNoNotesContent(
+        deriveEmptyReason({
+          audioChunkCount: input.audioChunkCount,
+          audioUncertaintyFlags: input.audioUncertaintyFlags,
+          transcriptSegments: input.transcriptSegments,
+          visualContexts: input.visualContexts,
+          ocrResults: input.ocrResults,
+          visionResults: input.visionResults,
+        }),
+      );
 
   return {
     noteSections: [
       {
         id: `note_${input.sessionId}_1`,
         sessionId: input.sessionId,
-        title: titleForMode(dominantMode),
+        title: hasAnyEvidence ? titleForMode(dominantMode) : "No notes available",
         startMs: 0,
         endMs: input.transcriptSegments.at(-1)?.endMs ?? 0,
         content,
@@ -90,25 +100,132 @@ export function composeEvidenceBackedNotes(
   };
 }
 
-function buildEvidenceBlock(
-  title: string,
-  items: string[],
-  emptyMessage: string,
-): string {
-  if (!items.length) {
-    return `${title}:\n- ${emptyMessage}`;
+function collectEvidence(items: string[], maxItems: number): string[] {
+  const seen = new Set<string>();
+  const collected: string[] = [];
+
+  for (const item of items) {
+    const cleaned = item.replace(/\s+/g, " ").trim();
+    if (!cleaned) {
+      continue;
+    }
+
+    const normalized = cleaned.toLowerCase();
+    if (seen.has(normalized)) {
+      continue;
+    }
+
+    seen.add(normalized);
+    collected.push(cleaned);
+
+    if (collected.length >= maxItems) {
+      break;
+    }
   }
 
-  return `${title}:\n${items.map((item) => `- ${item}`).join("\n")}`;
+  return collected;
 }
 
-function buildUncertaintyBlock(flags: UncertaintyFlag[]): string {
-  if (!flags.length) {
-    return "Uncertainty:\n- No additional uncertainty flags were emitted by the current scaffolding.";
+function buildReadableNotesContent(input: {
+  transcriptEvidence: string[];
+  ocrEvidence: string[];
+  visionEvidence: string[];
+}): string {
+  const hasTranscript = input.transcriptEvidence.length > 0;
+  const hasVisual = input.ocrEvidence.length > 0 || input.visionEvidence.length > 0;
+  const keyPoints = collectEvidence(
+    [...input.transcriptEvidence, ...input.ocrEvidence, ...input.visionEvidence],
+    8,
+  );
+  const lines: string[] = [];
+
+  lines.push("## Summary");
+  lines.push(`- ${summaryLine(hasTranscript, hasVisual)}`);
+
+  if (hasTranscript) {
+    lines.push("");
+    lines.push("## What was said");
+    for (const item of input.transcriptEvidence) {
+      lines.push(`- ${item}`);
+    }
   }
 
-  const uniqueMessages = Array.from(new Set(flags.map((flag) => `${flag.severity}: ${flag.message}`)));
-  return `Uncertainty:\n${uniqueMessages.map((message) => `- ${message}`).join("\n")}`;
+  lines.push("");
+  lines.push("## Key points");
+  if (keyPoints.length === 0) {
+    lines.push("- No key points could be extracted from available evidence.");
+  } else {
+    for (const item of keyPoints) {
+      lines.push(`- ${item}`);
+    }
+  }
+
+  if (hasVisual) {
+    lines.push("");
+    lines.push("## Visual observations");
+    for (const item of input.visionEvidence) {
+      lines.push(`- ${item}`);
+    }
+    for (const item of input.ocrEvidence) {
+      lines.push(`- Text seen: ${item}`);
+    }
+  }
+
+  return lines.join("\n");
+}
+
+function buildNoNotesContent(reason: string): string {
+  return [
+    "## Summary",
+    "- No notes available.",
+    "",
+    "## Why",
+    `- ${reason}`,
+  ].join("\n");
+}
+
+function summaryLine(hasTranscript: boolean, hasVisual: boolean): string {
+  if (hasTranscript && hasVisual) {
+    return "These notes combine spoken lecture content with useful camera observations.";
+  }
+  if (hasTranscript) {
+    return "These notes are based on spoken lecture audio.";
+  }
+  return "These notes are based on camera observations and detected text.";
+}
+
+function deriveEmptyReason(input: {
+  audioChunkCount: number;
+  audioUncertaintyFlags: UncertaintyFlag[];
+  transcriptSegments: TranscriptSegment[];
+  visualContexts: StructuredVisualContext[];
+  ocrResults: OCRResult[];
+  visionResults: VisionResult[];
+}): string {
+  const hadAudioInput = input.audioChunkCount > 0;
+  const hadImageInput =
+    input.visualContexts.length > 0 ||
+    input.ocrResults.length > 0 ||
+    input.visionResults.length > 0;
+
+  const hadAsrFailure = input.audioUncertaintyFlags.some((flag) =>
+    flag.kind.includes("transcription") ||
+    flag.kind.includes("asr") ||
+    flag.kind.includes("audio-artifact") ||
+    flag.kind.includes("parakeet"),
+  );
+
+  if (hadAudioInput) {
+    return hadAsrFailure
+      ? "No transcript could be generated from audio."
+      : "No words detected in audio.";
+  }
+
+  if (hadImageInput) {
+    return "No readable text found in images.";
+  }
+
+  return "No usable audio or image evidence.";
 }
 
 function titleForMode(mode: ModeWindow["mode"]): string {

@@ -91,6 +91,159 @@ export const getSessionById = queryGeneric({
   },
 });
 
+export const getPiControlState = queryGeneric({
+  args: {
+    deviceId: v.string(),
+  },
+  handler: async (ctx, args) => {
+    const deviceDoc = await findPiDeviceDocByDeviceId(ctx, args.deviceId);
+    const commandDocs = await ctx.db
+      .query("piControlCommands")
+      .withIndex("by_device", (q: any) => q.eq("deviceId", args.deviceId))
+      .collect();
+
+    const commands = commandDocs
+      .sort(compareTimestampDescending("requestedAt"))
+      .slice(0, 20)
+      .map(toPiControlCommandView);
+
+    return {
+      deviceId: args.deviceId,
+      device: deviceDoc
+        ? {
+            deviceId: deviceDoc.deviceId,
+            lastSeenAt: deviceDoc.lastSeenAt,
+            lastCommandPollAt: deviceDoc.lastCommandPollAt,
+            runtimeStatus: readString(deviceDoc.runtimeStatus),
+            activeSessionId: readString(deviceDoc.activeSessionId),
+            deviceIpAddress: readString(deviceDoc.deviceIpAddress),
+          }
+        : null,
+      commands,
+    };
+  },
+});
+
+export const enqueuePiControlCommand = mutationGeneric({
+  args: {
+    deviceId: v.string(),
+    commandType: v.union(
+      v.literal("start_session"),
+      v.literal("stop_session"),
+      v.literal("restart_service"),
+    ),
+    requestedBy: v.string(),
+    reason: v.optional(v.string()),
+  },
+  handler: async (ctx, args) => {
+    const now = nowIsoString();
+    const commandId = [
+      "cmd",
+      args.deviceId,
+      now.replace(/[^0-9]+/g, ""),
+      Math.random().toString(36).slice(2, 8),
+    ].join("_");
+
+    await ctx.db.insert("piControlCommands", {
+      commandId,
+      deviceId: args.deviceId,
+      commandType: args.commandType,
+      status: "pending",
+      requestedAt: now,
+      requestedBy: args.requestedBy,
+      reason: args.reason,
+      fetchCount: 0,
+      updatedAt: now,
+    });
+
+    const commandDoc = await findPiControlCommandDocByCommandId(ctx, commandId);
+    if (!commandDoc) {
+      throw new Error(`Unable to load command after enqueue: ${commandId}`);
+    }
+
+    return toPiControlCommandView(commandDoc);
+  },
+});
+
+export const pollNextPiControlCommand = mutationGeneric({
+  args: {
+    deviceId: v.string(),
+    runtimeStatus: v.optional(v.string()),
+    activeSessionId: v.optional(v.string()),
+    deviceIpAddress: v.optional(v.string()),
+  },
+  handler: async (ctx, args) => {
+    const now = nowIsoString();
+
+    await upsertPiDevicePresence(ctx, {
+      deviceId: args.deviceId,
+      runtimeStatus: args.runtimeStatus,
+      activeSessionId: args.activeSessionId,
+      deviceIpAddress: args.deviceIpAddress,
+      observedAt: now,
+    });
+
+    const pendingCommands = await ctx.db
+      .query("piControlCommands")
+      .withIndex("by_device_status", (q: any) =>
+        q.eq("deviceId", args.deviceId).eq("status", "pending"),
+      )
+      .collect();
+
+    const nextCommand = pendingCommands.sort(compareTimestampAscending("requestedAt"))[0];
+    if (!nextCommand) {
+      return {
+        command: null,
+      };
+    }
+
+    await ctx.db.patch(nextCommand._id, {
+      lastFetchedAt: now,
+      fetchCount: readNumber(nextCommand.fetchCount, 0) + 1,
+      updatedAt: now,
+    });
+
+    const patchedCommand = await ctx.db.get(nextCommand._id);
+    if (!patchedCommand) {
+      return { command: null };
+    }
+
+    return {
+      command: toPiControlCommandView(patchedCommand),
+    };
+  },
+});
+
+export const acknowledgePiControlCommand = mutationGeneric({
+  args: {
+    commandId: v.string(),
+    status: v.union(v.literal("applied"), v.literal("failed")),
+    errorMessage: v.optional(v.string()),
+  },
+  handler: async (ctx, args) => {
+    const commandDoc = await findPiControlCommandDocByCommandId(ctx, args.commandId);
+    if (!commandDoc) {
+      throw new Error(`Unknown command id: ${args.commandId}`);
+    }
+
+    const now = nowIsoString();
+    await ctx.db.patch(commandDoc._id, {
+      status: args.status,
+      appliedAt: args.status === "applied" ? now : commandDoc.appliedAt,
+      failedAt: args.status === "failed" ? now : commandDoc.failedAt,
+      errorMessage: args.status === "failed" ? args.errorMessage : undefined,
+      updatedAt: now,
+    });
+
+    const patchedCommand = await ctx.db.get(commandDoc._id);
+    if (!patchedCommand) {
+      throw new Error(`Unable to load command after acknowledge: ${args.commandId}`);
+    }
+
+    return toPiControlCommandView(patchedCommand);
+  },
+});
+
 export const startSession = mutationGeneric({
   args: {
     title: v.string(),
@@ -98,6 +251,7 @@ export const startSession = mutationGeneric({
     startedAt: v.string(),
     classroomLabel: v.optional(v.string()),
     clientSessionId: v.optional(v.string()),
+    deviceIpAddress: v.optional(v.string()),
   },
   handler: async (ctx, args) => {
     const sessionId = args.clientSessionId?.trim() || `session_${Date.now()}`;
@@ -111,12 +265,14 @@ export const startSession = mutationGeneric({
         startedAt: args.startedAt,
         status: "capturing",
         deviceId: args.deviceId,
+        deviceIpAddress: args.deviceIpAddress,
         classroomLabel: args.classroomLabel,
         updatedAt: now,
       });
     } else {
       sessionDocId = await ctx.db.insert("sessions", {
         sessionId,
+        deviceIpAddress: args.deviceIpAddress,
         title: args.title,
         startedAt: args.startedAt,
         status: "capturing",
@@ -144,6 +300,35 @@ export const startSession = mutationGeneric({
     const modeWindowDocs = await listModeWindows(ctx, sessionId);
     return {
       session: toSessionView(sessionDoc, modeWindowDocs),
+    };
+  },
+});
+
+export const renameSession = mutationGeneric({
+  args: {
+    sessionId: v.string(),
+    title: v.string(),
+  },
+  handler: async (ctx, args) => {
+    const sessionDoc = await requireSessionDocBySessionId(ctx, args.sessionId);
+    const nextTitle = args.title.trim();
+    if (!nextTitle) {
+      throw new Error("Session title cannot be empty.");
+    }
+
+    await ctx.db.patch(sessionDoc._id, {
+      title: nextTitle,
+      updatedAt: nowIsoString(),
+    });
+
+    const updatedDoc = await ctx.db.get(sessionDoc._id);
+    if (!updatedDoc) {
+      throw new Error(`Unable to load session after rename: ${args.sessionId}`);
+    }
+
+    const modeWindowDocs = await listModeWindows(ctx, args.sessionId);
+    return {
+      session: toSessionView(updatedDoc, modeWindowDocs),
     };
   },
 });
@@ -310,6 +495,7 @@ export const recordHeartbeat = mutationGeneric({
     lastAudioSequenceNumber: v.optional(v.number()),
     lastImageSequenceNumber: v.optional(v.number()),
     runtimeStatus: v.optional(v.string()),
+    deviceIpAddress: v.optional(v.string()),
   },
   handler: async (ctx, args) => {
     const sessionDoc = await requireSessionDocBySessionId(ctx, args.sessionId);
@@ -322,6 +508,7 @@ export const recordHeartbeat = mutationGeneric({
     await ctx.db.patch(sessionDoc._id, {
       status,
       updatedAt: receivedAt,
+      deviceIpAddress: args.deviceIpAddress || sessionDoc.deviceIpAddress,
     });
 
     return {
@@ -450,6 +637,9 @@ export const applyProcessingResult = mutationGeneric({
     const sessionDoc = await requireSessionDocBySessionId(ctx, args.sessionId);
     const normalizedResult = normalizeProcessingResult(args.sessionId, args.result);
     const updatedAt = nowIsoString();
+    const suggestedTitle = buildSuggestedTitleFromTranscript(
+      normalizedResult.transcriptSegments,
+    );
 
     await clearDerivedSessionArtifacts(ctx, args.sessionId);
 
@@ -530,7 +720,7 @@ export const applyProcessingResult = mutationGeneric({
       uncertaintyFlags: finalNotes.uncertaintyFlags,
     });
 
-    await ctx.db.patch(sessionDoc._id, {
+    const sessionPatch: Record<string, unknown> = {
       status: "complete",
       processingJobStatus: "completed",
       updatedAt,
@@ -540,7 +730,18 @@ export const applyProcessingResult = mutationGeneric({
         ...coerceArray(sessionDoc.uncertaintyFlags),
         ...normalizedResult.uncertaintyFlags,
       ]),
-    });
+    };
+
+    if (suggestedTitle) {
+      sessionPatch.suggestedTitle = suggestedTitle;
+
+      const currentTitle = normalizeWhitespace(readString(sessionDoc.title));
+      if (isPlaceholderSessionTitle(currentTitle)) {
+        sessionPatch.title = suggestedTitle;
+      }
+    }
+
+    await ctx.db.patch(sessionDoc._id, sessionPatch);
 
     const patchedSessionDoc = await ctx.db.get(sessionDoc._id);
     if (!patchedSessionDoc) {
@@ -563,6 +764,60 @@ async function requireSessionDocBySessionId(
     throw new Error(`Unknown session id: ${sessionId}`);
   }
   return sessionDoc;
+}
+
+async function findPiDeviceDocByDeviceId(
+  ctx: any,
+  deviceId: string,
+): Promise<Record<string, any> | null> {
+  return await ctx.db
+    .query("piDevices")
+    .withIndex("by_device_id", (q: any) => q.eq("deviceId", deviceId))
+    .first();
+}
+
+async function upsertPiDevicePresence(
+  ctx: any,
+  input: {
+    deviceId: string;
+    runtimeStatus?: string;
+    activeSessionId?: string;
+    deviceIpAddress?: string;
+    observedAt: string;
+  },
+): Promise<void> {
+  const existing = await findPiDeviceDocByDeviceId(ctx, input.deviceId);
+  if (existing) {
+    await ctx.db.patch(existing._id, {
+      lastSeenAt: input.observedAt,
+      lastCommandPollAt: input.observedAt,
+      runtimeStatus: input.runtimeStatus ?? existing.runtimeStatus,
+      activeSessionId: input.activeSessionId,
+      deviceIpAddress: input.deviceIpAddress ?? existing.deviceIpAddress,
+      updatedAt: input.observedAt,
+    });
+    return;
+  }
+
+  await ctx.db.insert("piDevices", {
+    deviceId: input.deviceId,
+    lastSeenAt: input.observedAt,
+    lastCommandPollAt: input.observedAt,
+    runtimeStatus: input.runtimeStatus,
+    activeSessionId: input.activeSessionId,
+    deviceIpAddress: input.deviceIpAddress,
+    updatedAt: input.observedAt,
+  });
+}
+
+async function findPiControlCommandDocByCommandId(
+  ctx: any,
+  commandId: string,
+): Promise<Record<string, any> | null> {
+  return await ctx.db
+    .query("piControlCommands")
+    .withIndex("by_command_id", (q: any) => q.eq("commandId", commandId))
+    .first();
 }
 
 async function findSessionDocBySessionId(
@@ -755,9 +1010,11 @@ function toSessionView(sessionDoc: Record<string, any>, modeWindowDocs: Record<s
   return {
     id: sessionDoc.sessionId,
     title: sessionDoc.title,
+    suggestedTitle: sessionDoc.suggestedTitle,
     startedAt: sessionDoc.startedAt,
     status: sessionDoc.status,
     deviceId: sessionDoc.deviceId,
+    deviceIpAddress: sessionDoc.deviceIpAddress,
     classroomLabel: sessionDoc.classroomLabel,
     endedAt: sessionDoc.endedAt,
     createdAt: sessionDoc.createdAt,
@@ -912,6 +1169,24 @@ function toUploadReceiptView(uploadReceiptDoc: Record<string, any>) {
   };
 }
 
+function toPiControlCommandView(commandDoc: Record<string, any>) {
+  return {
+    commandId: commandDoc.commandId,
+    deviceId: commandDoc.deviceId,
+    commandType: commandDoc.commandType,
+    status: commandDoc.status,
+    requestedAt: commandDoc.requestedAt,
+    requestedBy: commandDoc.requestedBy,
+    reason: commandDoc.reason,
+    lastFetchedAt: commandDoc.lastFetchedAt,
+    fetchCount: readNumber(commandDoc.fetchCount, 0),
+    appliedAt: commandDoc.appliedAt,
+    failedAt: commandDoc.failedAt,
+    errorMessage: commandDoc.errorMessage,
+    updatedAt: commandDoc.updatedAt,
+  };
+}
+
 function buildFinalNotes(
   sessionId: string,
   result: ReturnType<typeof normalizeProcessingResult>,
@@ -934,6 +1209,79 @@ function buildFinalNotes(
     imageIds: result.visualContexts.map((context) => context.imageId),
     uncertaintyFlags,
   };
+}
+
+function buildSuggestedTitleFromTranscript(
+  transcriptSegments: Array<{ text: string }>,
+): string | undefined {
+  const evidenceText = transcriptSegments
+    .map((segment) => normalizeWhitespace(segment.text))
+    .filter((text) => text.length > 0)
+    .slice(0, 10)
+    .join(" ");
+
+  if (!evidenceText) {
+    return undefined;
+  }
+
+  const firstSentence = evidenceText.split(/(?<=[.!?])\s+/)[0] ?? evidenceText;
+  const cleanedSentence = normalizeWhitespace(
+    firstSentence.replace(/[\u2018\u2019]/g, "'").replace(/[^\w\s'\-]/g, " "),
+  );
+  if (!cleanedSentence) {
+    return undefined;
+  }
+
+  const words = cleanedSentence
+    .split(" ")
+    .map((word) => normalizeWhitespace(word))
+    .filter((word) => word.length > 0);
+
+  const leadingFillers = new Set([
+    "ok",
+    "okay",
+    "so",
+    "um",
+    "uh",
+    "well",
+    "alright",
+    "right",
+    "today",
+  ]);
+
+  while (words.length > 3 && leadingFillers.has(words[0].toLowerCase())) {
+    words.shift();
+  }
+
+  if (words.length < 3) {
+    return undefined;
+  }
+
+  const cappedWords = words.slice(0, 10);
+  return toTitleCase(cappedWords.join(" "));
+}
+
+function normalizeWhitespace(value: string | undefined): string {
+  return value?.replace(/\s+/g, " ").trim() ?? "";
+}
+
+function isPlaceholderSessionTitle(value: string | undefined): boolean {
+  const normalized = normalizeWhitespace(value).toLowerCase();
+  if (!normalized) {
+    return true;
+  }
+
+  return normalized === "class session" || normalized.startsWith("class session ");
+}
+
+function toTitleCase(value: string): string {
+  return value
+    .split(" ")
+    .map((word) => {
+      const lower = word.toLowerCase();
+      return lower.charAt(0).toUpperCase() + lower.slice(1);
+    })
+    .join(" ");
 }
 
 function normalizeProcessingResult(sessionId: string, result: unknown) {
@@ -994,6 +1342,11 @@ function compareNumberAscending(field: string) {
 function compareTimestampAscending(field: string) {
   return (left: Record<string, any>, right: Record<string, any>) =>
     Date.parse(readString(left[field]) ?? "") - Date.parse(readString(right[field]) ?? "");
+}
+
+function compareTimestampDescending(field: string) {
+  return (left: Record<string, any>, right: Record<string, any>) =>
+    Date.parse(readString(right[field]) ?? "") - Date.parse(readString(left[field]) ?? "");
 }
 
 function dedupeUncertaintyFlags(flags: unknown[]) {

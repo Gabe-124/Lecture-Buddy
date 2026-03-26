@@ -4,7 +4,7 @@ import { extname, join } from "node:path";
 
 const DEFAULT_LOCAL_AUDIO_ARTIFACT_DIR = "/tmp/lecture-buddy-audio-artifacts";
 
-export interface StoredAudioArtifactRef {
+export interface StoredArtifactRef {
   storageKey: string;
   localPath?: string;
 }
@@ -18,14 +18,27 @@ interface PersistUploadedAudioArtifactInput {
 
 export async function persistUploadedAudioArtifact(
   input: PersistUploadedAudioArtifactInput,
-): Promise<StoredAudioArtifactRef> {
+): Promise<StoredArtifactRef> {
+  return persistUploadedArtifact({ ...input, kind: "audio" });
+}
+
+export async function persistUploadedImageArtifact(
+  input: PersistUploadedAudioArtifactInput,
+): Promise<StoredArtifactRef> {
+  return persistUploadedArtifact({ ...input, kind: "image" });
+}
+
+async function persistUploadedArtifact(
+  input: PersistUploadedAudioArtifactInput & { kind: "audio" | "image" },
+): Promise<StoredArtifactRef> {
   const safeSessionId = sanitizePathSegment(input.sessionId || "session");
   const safeChunkId = sanitizePathSegment(input.audioChunkId || "audio-chunk");
   const extension = normalizeExtension(input.originalFileName ?? input.file.name);
   const fileName = `${safeChunkId}${extension}`;
+  const blobPath = `sessions/${safeSessionId}/${input.kind}/${fileName}`;
 
   if (process.env.BLOB_READ_WRITE_TOKEN) {
-    const blob = await put(`sessions/${safeSessionId}/audio/${fileName}`, input.file, {
+    const blob = await put(blobPath, input.file, {
       access: "public",
       addRandomSuffix: true,
     });
@@ -35,9 +48,15 @@ export async function persistUploadedAudioArtifact(
     };
   }
 
+  if (isProductionEnvironment()) {
+    throw new Error(
+      "Durable artifact storage is not configured. Set BLOB_READ_WRITE_TOKEN so uploads are persisted for future reprocessing.",
+    );
+  }
+
   const artifactDirectory = process.env.LECTURE_BUDDY_AUDIO_ARTIFACT_DIR?.trim() ||
     DEFAULT_LOCAL_AUDIO_ARTIFACT_DIR;
-  const sessionDirectory = join(artifactDirectory, safeSessionId);
+  const sessionDirectory = join(artifactDirectory, safeSessionId, input.kind);
   const localPath = join(sessionDirectory, fileName);
 
   await mkdir(sessionDirectory, { recursive: true });
@@ -47,6 +66,10 @@ export async function persistUploadedAudioArtifact(
     storageKey: localPath,
     localPath,
   };
+}
+
+function isProductionEnvironment(): boolean {
+  return process.env.NODE_ENV === "production" || process.env.VERCEL === "1";
 }
 
 function sanitizePathSegment(value: string): string {

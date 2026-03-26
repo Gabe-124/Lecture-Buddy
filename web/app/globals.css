@@ -360,6 +360,14 @@ ul {
   transition: border-color 120ms ease;
 }
 
+.session-card__title-link {
+  color: inherit;
+}
+
+.session-card__title-link:hover {
+  color: var(--accent);
+}
+
 .session-card:hover,
 .tablink:hover,
 .topbar__nav a:hover {
@@ -453,6 +461,55 @@ ul {
 .hero__details-grid {
   display: grid;
   gap: 6px;
+}
+
+.control-panel {
+  display: grid;
+  gap: 12px;
+}
+
+.control-panel__meta-row {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  align-items: center;
+}
+
+.control-panel__form-grid {
+  display: grid;
+  gap: 10px;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+}
+
+.control-panel__field {
+  display: grid;
+  gap: 6px;
+}
+
+.control-panel__input {
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 8px 10px;
+  background: rgba(255, 255, 255, 0.95);
+}
+
+.control-panel__actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.control-panel__commands {
+  margin-top: 10px;
+  display: grid;
+  gap: 8px;
+}
+
+.control-panel__command-row {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  align-items: center;
 }
 
 .notes-list,

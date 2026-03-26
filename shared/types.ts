@@ -67,6 +67,7 @@ export interface Session {
   primarySpeakerLabel?: string;
   processingJobStatus?: ProcessingJobStatus;
   finalNotesId?: string;
+  deviceIpAddress?: string;
   modeWindows: ModeWindow[];
   uncertaintyFlags: UncertaintyFlag[];
 }

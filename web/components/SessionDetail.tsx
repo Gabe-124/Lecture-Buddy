@@ -20,6 +20,7 @@ interface SessionDetailProps {
   activeView: SessionView;
   primaryPanel: ReactNode;
   secondaryPanels?: ReactNode;
+  controlPanel?: ReactNode;
 }
 
 export function SessionDetail({
@@ -27,6 +28,7 @@ export function SessionDetail({
   activeView,
   primaryPanel,
   secondaryPanels,
+  controlPanel,
 }: SessionDetailProps) {
   const noteCount = bundle.finalNotes?.sections.length ?? 0;
   const reviewCount = bundle.uncertaintyFlags.length;
@@ -132,6 +134,7 @@ export function SessionDetail({
                 <span className="meta">Primary speaker {bundle.session.primarySpeakerLabel ?? "Unknown"}</span>
                 <span className="meta">Modes {bundle.session.modeWindows.length}</span>
                 <span className="meta">Upload receipts {bundle.uploadReceipts.length}</span>
+                <span className="meta">Pi IP {bundle.session.deviceIpAddress ?? "IP unavailable"}</span>
               </div>
             </details>
           </div>
@@ -149,6 +152,8 @@ export function SessionDetail({
           ))}
         </div>
       </div>
+
+      {controlPanel}
 
       {primaryPanel}
       {secondaryPanels}
