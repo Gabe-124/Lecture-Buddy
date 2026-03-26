@@ -1,0 +1,9 @@
+{
+  "name": "lecture-buddy-cloud-processing",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "local:test": "node --experimental-strip-types ./workers/run_local_job.ts"
+  }
+}
+
