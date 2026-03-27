@@ -16,6 +16,25 @@ interface PersistUploadedAudioArtifactInput {
   originalFileName?: string;
 }
 
+/**
+ * Resolve Blob token from environment variables.
+ * Checks both BLOB_READ_WRITE_TOKEN (standard) and Blob_READ_WRITE_TOKEN (legacy).
+ * Prefers standard uppercase name if both are present.
+ */
+function resolveBlobReadWriteToken(): string | undefined {
+  const standardToken = normalizeEnvToken(process.env.BLOB_READ_WRITE_TOKEN);
+  const legacyToken = normalizeEnvToken(process.env.Blob_READ_WRITE_TOKEN);
+  return standardToken || legacyToken;
+}
+
+function normalizeEnvToken(value: string | undefined): string | undefined {
+  if (!value) {
+    return undefined;
+  }
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed : undefined;
+}
+
 export async function persistUploadedAudioArtifact(
   input: PersistUploadedAudioArtifactInput,
 ): Promise<StoredArtifactRef> {
@@ -36,12 +55,34 @@ async function persistUploadedArtifact(
   const extension = normalizeExtension(input.originalFileName ?? input.file.name);
   const fileName = `${safeChunkId}${extension}`;
   const blobPath = `sessions/${safeSessionId}/${input.kind}/${fileName}`;
+  const hasStandardTokenEnv = !!normalizeEnvToken(process.env.BLOB_READ_WRITE_TOKEN);
+  const hasLegacyTokenEnv = !!normalizeEnvToken(process.env.Blob_READ_WRITE_TOKEN);
+  const blobToken = resolveBlobReadWriteToken();
+  const hasResolvedToken = !!blobToken;
 
-  if (process.env.BLOB_READ_WRITE_TOKEN) {
-    const blob = await put(blobPath, input.file, {
+  console.info("[artifact-storage] blob token diagnostics", {
+    kind: input.kind,
+    hasStandardTokenEnv,
+    hasLegacyTokenEnv,
+    hasResolvedToken,
+    resolvedTokenLength: blobToken?.length ?? 0,
+  });
+
+  if (blobToken) {
+    const putOptions = {
       access: "public",
       addRandomSuffix: true,
+      token: blobToken,
+    } as const;
+
+    console.info("[artifact-storage] put call diagnostics", {
+      kind: input.kind,
+      hasTokenOption: !!putOptions.token,
+      tokenOptionLength: putOptions.token.length,
+      blobPath,
     });
+
+    const blob = await put(blobPath, input.file, putOptions);
 
     return {
       storageKey: blob.url,
