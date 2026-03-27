@@ -541,6 +541,50 @@ ul {
   margin-bottom: 10px;
 }
 
+.note-structured {
+  display: grid;
+  gap: 14px;
+}
+
+.note-structured__title {
+  margin: 0;
+  font-size: 1.05rem;
+  letter-spacing: 0.01em;
+}
+
+.note-structured__section {
+  display: grid;
+  gap: 8px;
+}
+
+.note-structured__section h6 {
+  margin: 0;
+  color: var(--accent-deep);
+  font-size: 0.86rem;
+  font-weight: 700;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+}
+
+.note-structured__section ul {
+  margin: 0;
+  padding-left: 20px;
+  display: grid;
+  gap: 6px;
+}
+
+.note-structured__section li {
+  color: var(--text);
+  line-height: 1.4;
+}
+
+.note-item__flag-summary {
+  margin-top: 12px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
 .empty-state {
   display: grid;
   place-items: center;

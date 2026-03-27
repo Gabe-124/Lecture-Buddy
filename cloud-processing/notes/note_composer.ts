@@ -25,18 +25,7 @@ export interface NoteComposerOutput {
 export function composeEvidenceBackedNotes(
   input: NoteComposerInput,
 ): NoteComposerOutput {
-  const transcriptEvidence = collectEvidence(
-    input.transcriptSegments.map((segment) => segment.text),
-    10,
-  );
-  const ocrEvidence = collectEvidence(
-    input.ocrResults.map((result) => result.text),
-    6,
-  );
-  const visionEvidence = collectEvidence(
-    input.visionResults.map((result) => result.summary),
-    6,
-  );
+  const preparedTranscript = prepareTranscriptSegments(input.transcriptSegments);
 
   const uncertaintyFlags = dedupeUncertaintyFlags([
     ...input.transcriptSegments.flatMap((segment) => segment.uncertaintyFlags),
@@ -45,14 +34,13 @@ export function composeEvidenceBackedNotes(
     ...input.visualContexts.flatMap((context) => context.uncertaintyFlags),
   ]);
 
-  const hasTranscriptEvidence = transcriptEvidence.length > 0;
-  const hasVisualEvidence = ocrEvidence.length > 0 || visionEvidence.length > 0;
-  const hasAnyEvidence = hasTranscriptEvidence || hasVisualEvidence;
+  const hasTranscriptEvidence = preparedTranscript.kept.length > 0;
+  const hasAnyEvidence = hasTranscriptEvidence;
 
   if (!hasAnyEvidence) {
     uncertaintyFlags.push({
       kind: "note-evidence-empty",
-      message: "No usable audio or image evidence was available for notes generation.",
+      message: "No usable transcript evidence was available for notes generation.",
       source: "notes",
       severity: "high",
     });
@@ -60,11 +48,7 @@ export function composeEvidenceBackedNotes(
 
   const dominantMode = input.modeWindows[0]?.mode ?? "just_talking";
   const content = hasAnyEvidence
-    ? buildReadableNotesContent({
-        transcriptEvidence,
-        ocrEvidence,
-        visionEvidence,
-      })
+    ? buildChronologicalLectureNotes(preparedTranscript)
     : buildNoNotesContent(
         deriveEmptyReason({
           transcriptSegments: input.transcriptSegments,
@@ -79,11 +63,11 @@ export function composeEvidenceBackedNotes(
       {
         id: `note_${input.sessionId}_1`,
         sessionId: input.sessionId,
-        title: hasAnyEvidence ? titleForMode(dominantMode) : "No notes available",
-        startMs: 0,
+        title: hasAnyEvidence ? "Lecture notes" : "No notes available",
+        startMs: input.transcriptSegments.at(0)?.startMs ?? 0,
         endMs: input.transcriptSegments.at(-1)?.endMs ?? 0,
         content,
-        transcriptSegmentIds: input.transcriptSegments.map((segment) => segment.id),
+        transcriptSegmentIds: preparedTranscript.kept.map((segment) => segment.id),
         imageIds: input.visualContexts.map((context) => context.imageId),
         ocrResultIds: input.ocrResults.map((result) => result.id),
         visionResultIds: input.visionResults.map((result) => result.id),
@@ -95,74 +79,160 @@ export function composeEvidenceBackedNotes(
   };
 }
 
-function collectEvidence(items: string[], maxItems: number): string[] {
-  const seen = new Set<string>();
-  const collected: string[] = [];
-
-  for (const item of items) {
-    const cleaned = item.replace(/\s+/g, " ").trim();
-    if (!cleaned) {
-      continue;
-    }
-
-    const normalized = cleaned.toLowerCase();
-    if (seen.has(normalized)) {
-      continue;
-    }
-
-    seen.add(normalized);
-    collected.push(cleaned);
-
-    if (collected.length >= maxItems) {
-      break;
-    }
-  }
-
-  return collected;
+interface PreparedTranscriptSegment {
+  id: string;
+  startMs: number;
+  endMs: number;
+  text: string;
+  normalized: string;
+  tokens: string[];
 }
 
-function buildReadableNotesContent(input: {
-  transcriptEvidence: string[];
-  ocrEvidence: string[];
-  visionEvidence: string[];
-}): string {
-  const hasTranscript = input.transcriptEvidence.length > 0;
-  const hasVisual = input.ocrEvidence.length > 0 || input.visionEvidence.length > 0;
-  const keyPoints = collectEvidence(
-    [...input.transcriptEvidence, ...input.ocrEvidence, ...input.visionEvidence],
-    8,
-  );
-  const lines: string[] = [];
+interface PreparedTranscript {
+  kept: PreparedTranscriptSegment[];
+  openingSetupDetected: boolean;
+}
 
-  lines.push("## Summary");
-  lines.push(`- ${summaryLine(hasTranscript, hasVisual)}`);
+interface TopicBlock {
+  startMs: number;
+  endMs: number;
+  items: PreparedTranscriptSegment[];
+}
 
-  if (hasTranscript) {
-    lines.push("");
-    lines.push("## What was said");
-    for (const item of input.transcriptEvidence) {
-      lines.push(`- ${item}`);
+const STOPWORDS = new Set([
+  "a",
+  "an",
+  "and",
+  "are",
+  "as",
+  "at",
+  "be",
+  "by",
+  "for",
+  "from",
+  "how",
+  "in",
+  "is",
+  "it",
+  "its",
+  "of",
+  "on",
+  "or",
+  "that",
+  "the",
+  "their",
+  "this",
+  "to",
+  "we",
+  "with",
+  "you",
+]);
+
+const FILLER_PATTERNS = [
+  /^(uh+|um+|mm+|hmm+)$/i,
+  /^(yeah|yep|nope|okay|ok|alright|all right|right)\.?$/i,
+  /^(maybe|sure|so|well)\.?$/i,
+  /^can i turn this on\??$/i,
+  /^is (the )?(mic|microphone) on\??$/i,
+  /^can you hear me\??$/i,
+];
+
+const SETUP_CHATTER_PATTERN =
+  /(mic|microphone|speaker check|audio check|can you hear|projector|screen share|turn this on|slides (up|visible)|camera)/i;
+
+const MARKDOWN_ARTIFACT_PATTERN =
+  /^#{1,6}\s*(summary|what was said|key points|visual observations|why)\b/i;
+
+function prepareTranscriptSegments(
+  transcriptSegments: TranscriptSegment[],
+): PreparedTranscript {
+  const sorted = [...transcriptSegments].sort((a, b) => a.startMs - b.startMs);
+  const kept: PreparedTranscriptSegment[] = [];
+  const seenNormalized = new Set<string>();
+  let openingSetupDetected = false;
+  const openingThresholdMs = (sorted.at(0)?.startMs ?? 0) + 4 * 60 * 1000;
+
+  for (const segment of sorted) {
+    const cleaned = cleanTranscriptText(segment.text);
+    if (!cleaned || isMarkdownArtifact(cleaned)) {
+      continue;
     }
+
+    if (isLikelySetupChatter(cleaned) && segment.startMs <= openingThresholdMs) {
+      openingSetupDetected = true;
+      continue;
+    }
+
+    if (isLikelyFiller(cleaned)) {
+      continue;
+    }
+
+    const normalized = normalizeForDedup(cleaned);
+    if (!normalized || seenNormalized.has(normalized)) {
+      continue;
+    }
+
+    const tokens = tokenizeForSimilarity(cleaned);
+    if (isNearDuplicateOfRecent(kept, normalized, tokens)) {
+      continue;
+    }
+
+    seenNormalized.add(normalized);
+    kept.push({
+      id: segment.id,
+      startMs: segment.startMs,
+      endMs: segment.endMs,
+      text: cleaned,
+      normalized,
+      tokens,
+    });
   }
 
-  lines.push("");
-  lines.push("## Key points");
-  if (keyPoints.length === 0) {
-    lines.push("- No key points could be extracted from available evidence.");
+  return { kept, openingSetupDetected };
+}
+
+function buildChronologicalLectureNotes(prepared: PreparedTranscript): string {
+  const topicBlocks = buildTopicBlocks(prepared.kept);
+  const lines: string[] = ["Lecture notes", "", "Opening / setup"];
+
+  if (prepared.openingSetupDetected) {
+    lines.push("- Class began with brief microphone/setup checks.");
   } else {
-    for (const item of keyPoints) {
-      lines.push(`- ${item}`);
+    lines.push("- Lecture began without notable setup issues.");
+  }
+
+  lines.push("", "Main ideas");
+  if (topicBlocks.length === 0) {
+    lines.push("- No main ideas could be extracted from the transcript.");
+  } else {
+    for (const [index, block] of topicBlocks.slice(0, 6).entries()) {
+      const heading = describeTopicBlock(block, index + 1);
+      lines.push(`- ${heading}`);
+
+      const supportingPoints = pickSupportingPoints(block.items, 4);
+      for (const point of supportingPoints) {
+        lines.push(`  - ${point}`);
+      }
     }
   }
 
-  if (hasVisual) {
-    lines.push("");
-    lines.push("## Visual observations");
-    for (const item of input.visionEvidence) {
-      lines.push(`- ${item}`);
+  lines.push("", "Examples / named people / companies");
+  const examples = extractExamples(prepared.kept, 6);
+  if (examples.length === 0) {
+    lines.push("- No clear examples were explicitly named.");
+  } else {
+    for (const example of examples) {
+      lines.push(`- ${example}`);
     }
-    for (const item of input.ocrEvidence) {
-      lines.push(`- Text seen: ${item}`);
+  }
+
+  lines.push("", "Important lines");
+  const importantLines = extractImportantLines(prepared.kept, 4);
+  if (importantLines.length === 0) {
+    lines.push("- No standout line was detected with high confidence.");
+  } else {
+    for (const line of importantLines) {
+      lines.push(`- "${line}"`);
     }
   }
 
@@ -170,23 +240,7 @@ function buildReadableNotesContent(input: {
 }
 
 function buildNoNotesContent(reason: string): string {
-  return [
-    "## Summary",
-    "- No notes available.",
-    "",
-    "## Why",
-    `- ${reason}`,
-  ].join("\n");
-}
-
-function summaryLine(hasTranscript: boolean, hasVisual: boolean): string {
-  if (hasTranscript && hasVisual) {
-    return "These notes combine spoken lecture content with useful camera observations.";
-  }
-  if (hasTranscript) {
-    return "These notes are based on spoken lecture audio.";
-  }
-  return "These notes are based on camera observations and detected text.";
+  return ["No notes available", `Reason: ${reason}`].join("\n");
 }
 
 function deriveEmptyReason(input: {
@@ -202,28 +256,18 @@ function deriveEmptyReason(input: {
     input.visionResults.length > 0;
 
   if (hadAudioInput && !hadImageInput) {
-    return "No words detected.";
+    return "Transcript did not contain enough usable lecture content.";
   }
 
   if (hadImageInput && !hadAudioInput) {
-    return "No readable text found in images.";
+    return "Transcript was unavailable, and image evidence is not used for student notes.";
   }
 
   if (hadAudioInput && hadImageInput) {
-    return "No usable audio or image evidence.";
+    return "Transcript was too noisy after filtering filler and duplicate fragments.";
   }
 
-  return "No usable audio or image evidence.";
-}
-
-function titleForMode(mode: ModeWindow["mode"]): string {
-  if (mode === "slides") {
-    return "Evidence-backed notes for slide-focused lecture";
-  }
-  if (mode === "handwriting") {
-    return "Evidence-backed notes for handwriting/board session";
-  }
-  return "Evidence-backed notes for discussion session";
+  return "No transcript evidence was available.";
 }
 
 function dedupeUncertaintyFlags(flags: UncertaintyFlag[]): UncertaintyFlag[] {
@@ -246,4 +290,258 @@ function dedupeUncertaintyFlags(flags: UncertaintyFlag[]): UncertaintyFlag[] {
   }
 
   return deduped;
+}
+
+function buildTopicBlocks(segments: PreparedTranscriptSegment[]): TopicBlock[] {
+  if (segments.length === 0) {
+    return [];
+  }
+
+  const blocks: TopicBlock[] = [];
+  let current: TopicBlock = {
+    startMs: segments[0].startMs,
+    endMs: segments[0].endMs,
+    items: [segments[0]],
+  };
+
+  for (const segment of segments.slice(1)) {
+    const previous = current.items.at(-1);
+    const gapMs = segment.startMs - (previous?.endMs ?? segment.startMs);
+    const lexicalOverlap = tokenOverlap(segment.tokens, collectBlockTokens(current.items));
+    const shouldSplit =
+      gapMs > 2 * 60 * 1000 ||
+      (current.items.length >= 4 && gapMs > 60 * 1000 && lexicalOverlap < 0.1);
+
+    if (shouldSplit) {
+      blocks.push(current);
+      current = {
+        startMs: segment.startMs,
+        endMs: segment.endMs,
+        items: [segment],
+      };
+      continue;
+    }
+
+    current.items.push(segment);
+    current.endMs = segment.endMs;
+  }
+
+  blocks.push(current);
+  return blocks;
+}
+
+function describeTopicBlock(block: TopicBlock, index: number): string {
+  const keywords = topKeywords(block.items, 2);
+  if (keywords.length > 0) {
+    return `Topic ${index}: ${keywords.join(" and ")}`;
+  }
+  return `Topic ${index}`;
+}
+
+function pickSupportingPoints(
+  items: PreparedTranscriptSegment[],
+  maxItems: number,
+): string[] {
+  const points: string[] = [];
+  const seen = new Set<string>();
+
+  for (const item of items) {
+    const normalized = normalizeForDedup(item.text);
+    if (!normalized || seen.has(normalized) || item.text.length < 24) {
+      continue;
+    }
+
+    points.push(toSentenceCase(item.text));
+    seen.add(normalized);
+
+    if (points.length >= maxItems) {
+      break;
+    }
+  }
+
+  return points;
+}
+
+function extractExamples(
+  segments: PreparedTranscriptSegment[],
+  maxItems: number,
+): string[] {
+  const examples: string[] = [];
+  const seen = new Set<string>();
+
+  for (const segment of segments) {
+    if (!isExampleLike(segment.text)) {
+      continue;
+    }
+
+    const normalized = normalizeForDedup(segment.text);
+    if (!normalized || seen.has(normalized)) {
+      continue;
+    }
+
+    examples.push(toSentenceCase(segment.text));
+    seen.add(normalized);
+
+    if (examples.length >= maxItems) {
+      break;
+    }
+  }
+
+  return examples;
+}
+
+function extractImportantLines(
+  segments: PreparedTranscriptSegment[],
+  maxItems: number,
+): string[] {
+  const lines: string[] = [];
+  const seen = new Set<string>();
+
+  for (const segment of segments) {
+    if (!isImportantLine(segment.text)) {
+      continue;
+    }
+
+    const normalized = normalizeForDedup(segment.text);
+    if (!normalized || seen.has(normalized)) {
+      continue;
+    }
+
+    lines.push(toSentenceCase(segment.text));
+    seen.add(normalized);
+
+    if (lines.length >= maxItems) {
+      break;
+    }
+  }
+
+  return lines;
+}
+
+function cleanTranscriptText(text: string): string {
+  const withoutArtifacts = text
+    .replace(/\s+/g, " ")
+    .replace(/(^|\s)[-]{2,}(?=\s|$)/g, " ")
+    .trim();
+
+  return withoutArtifacts
+    .replace(/\s([?.!,;:])/g, "$1")
+    .replace(/[|]{2,}/g, "|")
+    .trim();
+}
+
+function normalizeForDedup(text: string): string {
+  return text
+    .toLowerCase()
+    .replace(/[^a-z0-9\s]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function tokenizeForSimilarity(text: string): string[] {
+  return normalizeForDedup(text)
+    .split(" ")
+    .filter((token) => token.length >= 3 && !STOPWORDS.has(token));
+}
+
+function collectBlockTokens(items: PreparedTranscriptSegment[]): Set<string> {
+  const tokens = new Set<string>();
+  for (const item of items) {
+    for (const token of item.tokens) {
+      tokens.add(token);
+    }
+  }
+  return tokens;
+}
+
+function tokenOverlap(tokens: string[], existing: Set<string>): number {
+  if (tokens.length === 0) {
+    return 0;
+  }
+
+  let overlap = 0;
+  for (const token of tokens) {
+    if (existing.has(token)) {
+      overlap += 1;
+    }
+  }
+  return overlap / tokens.length;
+}
+
+function isNearDuplicateOfRecent(
+  kept: PreparedTranscriptSegment[],
+  normalized: string,
+  tokens: string[],
+): boolean {
+  const recent = kept.slice(-8);
+  for (const previous of recent) {
+    if (previous.normalized === normalized) {
+      return true;
+    }
+
+    const lexicalOverlap = tokenOverlap(tokens, new Set(previous.tokens));
+    if (lexicalOverlap >= 0.9 && tokens.length > 3) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+function isLikelyFiller(text: string): boolean {
+  const normalized = normalizeForDedup(text);
+  if (!normalized) {
+    return true;
+  }
+
+  if (FILLER_PATTERNS.some((pattern) => pattern.test(normalized))) {
+    return true;
+  }
+
+  const wordCount = normalized.split(" ").length;
+  return wordCount <= 2 && normalized.length <= 12;
+}
+
+function isLikelySetupChatter(text: string): boolean {
+  return SETUP_CHATTER_PATTERN.test(text);
+}
+
+function isMarkdownArtifact(text: string): boolean {
+  return MARKDOWN_ARTIFACT_PATTERN.test(text);
+}
+
+function isExampleLike(text: string): boolean {
+  return /\b(for example|for instance|such as|case study|example|company|founder|ceo)\b/i.test(
+    text,
+  );
+}
+
+function isImportantLine(text: string): boolean {
+  return /\b(important|remember|key point|definition|means|therefore|takeaway)\b/i.test(text);
+}
+
+function topKeywords(items: PreparedTranscriptSegment[], maxItems: number): string[] {
+  const counts = new Map<string, number>();
+
+  for (const item of items) {
+    for (const token of item.tokens) {
+      if (token.length < 4) {
+        continue;
+      }
+      counts.set(token, (counts.get(token) ?? 0) + 1);
+    }
+  }
+
+  return [...counts.entries()]
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, maxItems)
+    .map(([token]) => toSentenceCase(token));
+}
+
+function toSentenceCase(text: string): string {
+  const trimmed = text.trim();
+  if (!trimmed) {
+    return trimmed;
+  }
+  return trimmed[0].toUpperCase() + trimmed.slice(1);
 }
