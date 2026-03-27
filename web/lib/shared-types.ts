@@ -188,6 +188,7 @@ export interface NoteSection {
   title: string;
   startMs: number;
   endMs: number;
+  contentFormat?: "lecture-notes-v2";
   content: string;
   transcriptSegmentIds: string[];
   imageIds: string[];

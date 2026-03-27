@@ -123,6 +123,7 @@ const noteSection = v.object({
   title: v.string(),
   startMs: v.number(),
   endMs: v.number(),
+  contentFormat: v.optional(v.literal("lecture-notes-v2")),
   content: v.string(),
   transcriptSegmentIds: v.array(v.string()),
   imageIds: v.array(v.string()),

@@ -90,6 +90,20 @@ export async function postSessionsEnd(
       existingModeWindows: bundle.modeWindows,
     });
 
+    const firstNote = result.notes[0];
+    console.info("[notes.diagnostic] worker output", {
+      sessionId: payload.sessionId,
+      source:
+        "web/server/cloud_processing/notes/note_composer.ts:composeEvidenceBackedNotes",
+      noteCount: result.notes.length,
+      firstNoteTitle: firstNote?.title,
+      firstNoteFirstLine: firstNote?.content.split("\n")[0]?.trim() ?? "",
+      containsLegacyTemplate:
+        /##\s*(summary|what was said|key points)|these notes are based on spoken lecture audio/i.test(
+          firstNote?.content ?? "",
+        ),
+    });
+
     console.info("[sessions.end] apply result", { sessionId: payload.sessionId });
     const persisted = await fetchMutation(
       lectureBuddyApi.applyProcessingResult,
@@ -178,6 +192,20 @@ export async function postReprocessSession(sessionId: string) {
       audioChunks: bundle.audioChunks,
       capturedImages: bundle.capturedImages,
       existingModeWindows: bundle.modeWindows,
+    });
+
+    const firstNote = result.notes[0];
+    console.info("[notes.diagnostic] worker output", {
+      sessionId,
+      source:
+        "web/server/cloud_processing/notes/note_composer.ts:composeEvidenceBackedNotes",
+      noteCount: result.notes.length,
+      firstNoteTitle: firstNote?.title,
+      firstNoteFirstLine: firstNote?.content.split("\n")[0]?.trim() ?? "",
+      containsLegacyTemplate:
+        /##\s*(summary|what was said|key points)|these notes are based on spoken lecture audio/i.test(
+          firstNote?.content ?? "",
+        ),
     });
 
     const persisted = await fetchMutation(
